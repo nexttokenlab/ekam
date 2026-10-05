@@ -1,0 +1,21 @@
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY index.html tsconfig*.json vite.config.ts ./
+COPY src ./src
+COPY public ./public
+RUN npm run build
+
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY backend/requirements.txt backend/requirements.lock.txt ./backend/
+RUN pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock.txt
+RUN useradd --create-home --uid 10001 app && mkdir -p /data && chown app:app /data
+COPY --chown=app:app backend ./backend
+COPY --from=frontend --chown=app:app /app/dist ./dist
+USER app
+ENV DATABASE_PATH=/data/talkeasy.sqlite3
+EXPOSE 8017
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8017", "--workers", "1"]

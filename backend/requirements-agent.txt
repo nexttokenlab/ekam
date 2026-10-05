@@ -1,0 +1,4 @@
+-r requirements.txt
+livekit-agents[silero,turn-detector,openai,sarvam,google]>=1.8,<1.9
+livekit-plugins-noise-cancellation>=0.2,<1
+livekit-plugins-fishaudio>=1.8,<1.9

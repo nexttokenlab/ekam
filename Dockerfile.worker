@@ -1,0 +1,11 @@
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libportaudio2 && rm -rf /var/lib/apt/lists/*
+COPY backend/requirements.lock.txt ./backend/
+RUN pip install --no-cache-dir -r backend/requirements.lock.txt
+RUN useradd --create-home --uid 10001 app
+COPY --chown=app:app backend ./backend
+USER app
+RUN python -m backend.agent download-files
+CMD ["python", "-m", "backend.worker_runtime"]

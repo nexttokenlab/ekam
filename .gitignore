@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.impeccable/questions/
+.impeccable/review/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.venv/
+__pycache__/
+.pytest_cache/
+backend/data/
+.env
+*.ses
+PRIVATE_TEST_ACCESS.txt
+
+# Not app code: demo media/render output and design-tool settings stay local.
+demo-video/
+.impeccable/

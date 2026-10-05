@@ -1,0 +1,15 @@
+.git
+.venv
+node_modules
+dist
+.env
+.env.*
+backend/data
+**/__pycache__
+.pytest_cache
+.impeccable
+*.ses
+*.log
+test-results
+playwright-report
+PRIVATE_TEST_ACCESS.txt

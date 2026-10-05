@@ -1,0 +1,5 @@
+export const supportedLanguages = ["English", "Hindi", "Kannada", "Tamil", "Telugu", "Malayalam", "Marathi", "Gujarati", "Punjabi", "Bengali", "French", "Arabic", "Italian", "Korean", "Japanese"] as const;
+export type Language = typeof supportedLanguages[number];
+export const languageNative: Record<Language, string> = {"English": "English", "Hindi": "हिन्दी", "Bengali": "বাংলা", "Tamil": "தமிழ்", "Telugu": "తెలుగు", "Gujarati": "ગુજરાતી", "Kannada": "ಕನ್ನಡ", "Malayalam": "മലയാളം", "Marathi": "मराठी", "Punjabi": "ਪੰਜਾਬੀ", "French": "Français", "Arabic": "العربية", "Italian": "Italiano", "Korean": "한국어", "Japanese": "日本語"};
+// First letter of each language's own name, shown as its icon in language pickers.
+export const languageGlyph: Record<Language, string> = {"English": "E", "Hindi": "ह", "Bengali": "বা", "Tamil": "த", "Telugu": "తె", "Gujarati": "ગુ", "Kannada": "ಕ", "Malayalam": "മ", "Marathi": "म", "Punjabi": "ਪੰ", "French": "F", "Arabic": "ع", "Italian": "I", "Korean": "한", "Japanese": "日"};
