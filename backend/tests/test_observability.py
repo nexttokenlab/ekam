@@ -57,3 +57,10 @@ def test_real_sdk_primary_guard_accepts_both_directions_and_reconfiguration(monk
     asyncio.run(scenario())
     assert calls[0]['traces'] and calls[0]['logs']
     assert all(not any(options.values()) for options in calls[1:])
+
+
+def test_benchmark_mode_disables_sdk_recording_exports(monkeypatch):
+    monkeypatch.setenv('EKAM_LATENCY_ENABLED', 'true')
+    assert observability.recording_options() == {
+        'audio': False, 'transcript': False, 'traces': False, 'logs': False,
+    }

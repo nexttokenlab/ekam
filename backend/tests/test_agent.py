@@ -669,3 +669,88 @@ def test_voice_clone_helpers_talk_to_fish_audio():
         assert delete.url.path == '/model/fish-voice-1' and speak.headers['model'] == 's2.1-pro'
         assert voice_clone.speaks('Kannada') and not voice_clone.speaks('Malayalam')
     asyncio.run(scenario())
+
+
+
+def test_latency_winner_and_content_free_rows(monkeypatch):
+    """Exercise the real interpreter with mocked streaming provider responses."""
+    from backend.latency import Probe
+    monkeypatch.setenv('TRANSLATION_PROVIDER', 'gemini')
+    async def scenario():
+        agent, context, control, _ = interpreter_fixture()
+        values = []
+        agent.latency = Probe('English', 'Hindi', enabled=True, emit=values.append, origin='simulated')
+        assert await collect(agent, context) == 'Translated words.'
+        await asyncio.gather(*control.tasks)
+        assert {v['metric'] for v in values} == {'translation_first_text', 'translation_complete'}
+        assert all(v['provider'] == 'gemini' and v['outcome'] == 'ok' and v['origin'] == 'simulated' for v in values)
+        assert len({v['sample_id'] for v in values}) == 1
+        assert 'Translated' not in json.dumps(values)
+        assert 'Alice' not in json.dumps(values)
+    asyncio.run(scenario())
+
+
+def test_latency_tts_first_frame_not_sdk_or_acoustic_playback(monkeypatch):
+    from backend.latency import Probe
+    from backend.agent import Agent
+    async def frames(*args):
+        yield object()
+        yield object()
+    monkeypatch.setattr(Agent.default, 'tts_node', frames)
+    async def scenario():
+        agent, _, _, _ = interpreter_fixture()
+        values = []
+        agent.latency = Probe('English', 'Hindi', enabled=True, emit=values.append, origin='simulated')
+        assert len([frame async for frame in agent.tts_node(None, None)]) == 2
+        assert [v['metric'] for v in values] == ['tts_node_first_frame', 'tts_node_complete']
+        assert all(v['provider'] == 'sarvam' for v in values)
+    asyncio.run(scenario())
+
+
+def test_latency_attributes_sarvam_winner_and_keeps_mock_origin():
+    from backend.latency import Probe
+    async def scenario():
+        agent, context, control, _ = interpreter_fixture()
+        agent.mayura_client = object()
+        agent.sarvam_translate = AsyncMock(return_value='Synthetic translation')
+        values = []
+        agent.latency = Probe('English', 'Hindi', enabled=True, emit=values.append, origin='simulated')
+        assert await collect(agent, context) == 'Synthetic translation'
+        await asyncio.gather(*control.tasks)
+        assert all(v['provider'] == 'sarvam-mayura' and v['origin'] == 'simulated' for v in values)
+        assert all(v['outcome'] == 'ok' for v in values)
+    asyncio.run(scenario())
+
+
+def test_latency_discarded_speculation_does_not_enter_success_cohort(monkeypatch):
+    from backend.latency import Probe
+    import backend.agent as module
+    monkeypatch.setattr(module, 'speech_committed', AsyncMock(return_value=False))
+    async def scenario():
+        agent, context, control, _ = interpreter_fixture()
+        values = []
+        agent.latency = Probe('English', 'Hindi', enabled=True, emit=values.append, origin='simulated')
+        await collect(agent, context)
+        await asyncio.gather(*control.tasks)
+        assert values and all(v['outcome'] == 'discarded' for v in values)
+        control.client.post.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_latency_tts_closing_consumer_closes_provider_stream(monkeypatch):
+    from backend.agent import Agent
+    closed = []
+    async def frames(*args):
+        try:
+            yield object()
+            await asyncio.sleep(100)
+        finally:
+            closed.append(True)
+    monkeypatch.setattr(Agent.default, 'tts_node', frames)
+    async def scenario():
+        agent, _, _, _ = interpreter_fixture()
+        output = agent.tts_node(None, None)
+        await anext(output)
+        await output.aclose()
+        assert closed == [True]
+    asyncio.run(scenario())

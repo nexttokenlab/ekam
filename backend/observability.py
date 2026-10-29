@@ -5,11 +5,16 @@ Do not attach prompts, transcripts, credentials, or participant details here.
 """
 from contextlib import contextmanager
 import time
+import os
 from livekit.agents.telemetry import tracer
+from backend.latency import Probe
 
 
 def recording_options():
-    return {'audio': False, 'transcript': False, 'traces': True, 'logs': True}
+    # SDK traces may include model text independently of transcript recording.
+    # Benchmark mode uses only our allowlisted local latency rows.
+    insights = os.getenv('EKAM_LATENCY_ENABLED', 'false').lower() != 'true'
+    return {'audio': False, 'transcript': False, 'traces': insights, 'logs': insights}
 
 
 class JobRecording:
@@ -35,12 +40,18 @@ def stage(name, **attributes):
         'ekam.' + key: value for key, value in attributes.items()
     })
     started = time.perf_counter()
+    outcome = 'ok'
     try:
         yield span
     except BaseException as error:
+        outcome = 'cancelled' if type(error).__name__ in ('CancelledError', 'GeneratorExit') else 'error'
         # Never record exception messages: provider errors can contain request text.
         span.set_attribute('ekam.error_type', type(error).__name__)
         raise
     finally:
         span.set_attribute('ekam.duration_seconds', time.perf_counter() - started)
         span.end()
+        if name == 'translation_provider':
+            Probe(attributes.get('source_language'), attributes.get('target_language')).observe(
+                attributes.get('provider', 'unknown'), 'translation_request',
+                time.perf_counter() - started, outcome=outcome)
