@@ -1,3 +1,4 @@
+import { observePlayback } from './lib/latency';
 import { AppLocale, initialLocale, languageLocale, translate, useTranslation, type Gender } from './lib/i18n';
 import { localeNames, localeLanguage, scanPrompt, onboardingCopy, validLocale, type Locale } from './lib/onboarding-copy';
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -837,12 +838,21 @@ export default function App() {
       };
       activeRoom.on(RoomEvent.TrackPublished, subscribe);
       const attachedTracks = new Set<string>();
+      const playbackProbes = new Map<string, () => void>();
+      activeRoom.on(RoomEvent.Disconnected, () => {
+        playbackProbes.forEach(stop => stop());
+        playbackProbes.clear();
+      });
       activeRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
         if (room.current !== activeRoom || attachedTracks.has(publication.trackSid)) return;
         if (participant.kind === 4 && track.kind === Track.Kind.Audio && publication.trackName === `translation:${creds.identity}`) {
           attachedTracks.add(publication.trackSid);
           const el = track.attach();
           el.autoplay = true;
+          playbackProbes.set(publication.trackSid, observePlayback(
+            el, new MediaStream([track.mediaStreamTrack]), session.peer.language,
+            creds.identity === session.a ? session.language_a : session.language_b,
+          ));
           document.body.appendChild(el);
           audioElements.current.push(el);
           el.play().catch(() =>
@@ -852,6 +862,8 @@ export default function App() {
       });
       activeRoom.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
         attachedTracks.delete(publication.trackSid);
+        playbackProbes.get(publication.trackSid)?.();
+        playbackProbes.delete(publication.trackSid);
         const detached = track.detach();
         detached.forEach(el => el.remove());
         audioElements.current = audioElements.current.filter(el => !detached.includes(el));

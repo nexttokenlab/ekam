@@ -22,7 +22,7 @@ from livekit.plugins import fishaudio, openai, sarvam, silero
 from livekit.plugins.google.beta import GeminiTTS
 from backend.gemini_stt import GeminiSTT
 from backend import mayura, voice_clone, voices
-from backend.observability import JobRecording, stage
+from backend.observability import JobRecording, stage, Probe
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from backend.translation import TranslationConfig
 try:
@@ -264,6 +264,10 @@ class Interpreter(Agent):
             + gender_guidance(source.get('gender'), target.get('gender'))
         ))
         self.source, self.target, self.control, self.translator = source, target, control, translator
+        self.latency = Probe(source['language'], target['language'])
+        self.stt_provider = 'gemini' if source['language'] in GEMINI_LANGUAGES else 'sarvam'
+        self.tts_provider = ('fishaudio-fallback' if source.get('voice') == 'self' and source.get('voice_clone') and voice_clone.api_key() and voice_clone.speaks(target['language'])
+                             else 'gemini' if target['language'] in GEMINI_LANGUAGES else 'sarvam')
         self.pending: dict | None = None
         self.save_tasks: dict[str, asyncio.Task] = {}
         self.completed_records: set[str] = set()
@@ -358,22 +362,67 @@ class Interpreter(Agent):
             return None
         return theirs / max(mine, 1.0)
 
-    async def llm_node(self, chat_ctx, tools, model_settings):
-        # Generation stays non-speculative: only committed user turns reach this node.
-        # Yielding deltas lets LiveKit feed its streaming TTS while translation continues.
-        self.pending = None
+    async def tts_node(self, text, model_settings):
+        # Includes time awaiting streamed input and chunking; SDK TTFB is separate.
+        started, first, outcome = time.perf_counter(), None, 'ok'
+        sample_id = uuid.uuid4().hex
         try:
-            async with aclosing(self.translate_turn(chat_ctx)) as translation:
+            async with aclosing(Agent.default.tts_node(self, text, model_settings)) as audio:
+                async for frame in audio:
+                    if first is None:
+                        first = time.perf_counter() - started
+                    yield frame
+        except BaseException as error:
+            outcome = 'cancelled' if isinstance(error, (asyncio.CancelledError, GeneratorExit)) else 'error'
+            raise
+        finally:
+            if first is not None:
+                self.latency.observe(self.tts_provider, 'tts_node_first_frame', first,
+                                     outcome=outcome, sample_id=sample_id)
+            self.latency.observe(self.tts_provider, 'tts_node_complete', time.perf_counter() - started,
+                                 outcome='suppressed' if first is None and outcome == 'ok' else outcome, sample_id=sample_id)
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        self.pending = None
+        started, first, outcome = time.perf_counter(), None, 'ok'
+        timing = {'provider': 'unknown'}  # Local to this speculative attempt.
+        handle, sample_id = current_speech(), uuid.uuid4().hex
+        try:
+            async with aclosing(self.translate_turn(chat_ctx, timing=timing)) as translation:
                 async for text in translation:
+                    if first is None:
+                        first = time.perf_counter() - started
                     yield text
         except APIError as error:
+            outcome = 'error'
             logger.warning('Translation provider failed: %s', type(error).__name__)
             self.control.spawn(self.control.status('Translation is temporarily unavailable. Please try speaking again.'))
         except httpx.HTTPError:
+            outcome = 'error'
             self.control.gate(False)
             self.control.spawn(self.control.status('Reconnecting to the conversation. Audio is paused.'))
+        except BaseException as error:
+            outcome = 'cancelled' if isinstance(error, (asyncio.CancelledError, GeneratorExit)) else 'error'
+            raise
+        finally:
+            elapsed = time.perf_counter() - started
+            if self.latency.enabled:
+                async def report():
+                    result = outcome
+                    if not await speech_committed(handle):
+                        result = 'discarded'
+                    elif first is None and result == 'ok':
+                        result = 'suppressed'
+                    elif result == 'ok' and not timing.get('complete', False):
+                        result = 'interrupted'
+                    if first is not None:
+                        self.latency.observe(timing['provider'], 'translation_first_text', first,
+                                             outcome=result, sample_id=sample_id)
+                    self.latency.observe(timing['provider'], 'translation_complete', elapsed,
+                                         outcome=result, sample_id=sample_id)
+                self.control.spawn(report())
 
-    async def translate_turn(self, chat_ctx):
+    async def translate_turn(self, chat_ctx, *, timing=None):
         message = next((m for m in reversed(chat_ctx.items) if isinstance(m, llm.ChatMessage) and m.role == 'user'), None)
         if not message or not message.text_content:
             return
@@ -428,6 +477,8 @@ class Interpreter(Agent):
                     return
                 self.pending = record
                 record['translation'] = source_text
+                if timing is not None:
+                    timing['provider'] = 'passthrough'
                 yield source_text
                 finished = True
                 return
@@ -437,7 +488,7 @@ class Interpreter(Agent):
                 if done:
                     text, mayura_task = mayura_task.result(), None
                     if text is not None:
-                        if await self.emit_whole(record, epoch, text, started):
+                        if await self.emit_whole(record, epoch, text, started, timing=timing):
                             yield text
                             finished = True
                         return
@@ -465,7 +516,7 @@ class Interpreter(Agent):
                             # Mayura (the preferred provider) finished first: speak it whole.
                             span.set_attribute('ekam.hedge_winner', 'mayura')
                             text = mayura_task.result()
-                            if await self.emit_whole(record, epoch, text, started):
+                            if await self.emit_whole(record, epoch, text, started, timing=timing):
                                 yield text
                                 finished = True
                             return
@@ -481,7 +532,7 @@ class Interpreter(Agent):
                     text = await mayura_task
                     if text is None:
                         raise
-                    if await self.emit_whole(record, epoch, text, started):
+                    if await self.emit_whole(record, epoch, text, started, timing=timing):
                         yield text
                         finished = True
                     return
@@ -499,6 +550,8 @@ class Interpreter(Agent):
                 logger.info('voice_latency stage=translation_first_text provider=%s source=%s target=%s seconds=%.3f',
                             config.provider, self.source['language'], self.target['language'], time.perf_counter()-started)
                 self.pending = record
+                if timing is not None:
+                    timing['provider'] = config.provider
                 text = first
                 while True:
                     if not self.control.allows(epoch):
@@ -510,6 +563,8 @@ class Interpreter(Agent):
                         break
             finished = True
         finally:
+            if timing is not None:
+                timing['complete'] = finished
             pending = [task for task in (mayura_task, first_task) if task is not None and not task.done()]
             for task in pending:
                 task.cancel()
@@ -556,11 +611,14 @@ class Interpreter(Agent):
                 return text
         return None
 
-    async def emit_whole(self, record, epoch, text, started):
+    async def emit_whole(self, record, epoch, text, started, *, timing=None):
         if not await self.control.valid(epoch):
             return False
         provider = mayura.LABELS.get(mayura.model_for(self.source['language'], self.target['language'], record['source']), 'sarvam')
         logger.info('voice_latency stage=translation_first_text provider=%s source=%s target=%s seconds=%.3f', provider, self.source['language'], self.target['language'], time.perf_counter()-started)
+        if timing is not None:
+            model = mayura.model_for(self.source['language'], self.target['language'], record['source'])
+            timing['provider'] = 'sarvam-mayura' if model == 'mayura:v1' else 'sarvam-translate'
         self.pending = record
         record['translation'] = text
         return True
@@ -656,6 +714,7 @@ async def entrypoint(ctx: JobContext):
                 def completed(event, interpreter=agent):
                     if isinstance(event.item, llm.ChatMessage) and event.item.role == 'assistant':
                         timing = {key: event.item.metrics[key] for key in ('e2e_latency', 'tts_node_ttfb', 'llm_node_ttft', 'llm_node_ttfs', 'playback_latency') if key in event.item.metrics}
+                        interpreter.latency.sdk_playout(event.item.metrics, 'unknown', event.item.interrupted)
                         logger.info('voice_playout source=%s target=%s values=%s', interpreter.source['language'], interpreter.target['language'], json.dumps(timing))
                     if isinstance(event.item, llm.ChatMessage) and event.item.role == 'assistant' and event.item.interrupted:
                         control.spawn(interpreter.record_interruption(interpreter.pending))
@@ -667,8 +726,9 @@ async def entrypoint(ctx: JobContext):
                     if speaking is not None:
                         control.spawn(control.playback(listener, speaking))
                 session.on('agent_state_changed', agent_state)
-                def metrics(event, source_language=source['language'], target_language=target['language']):
+                def metrics(event, source_language=source['language'], target_language=target['language'], interpreter=agent):
                     m = event.metrics
+                    interpreter.latency.sdk_metrics(m, interpreter.stt_provider, interpreter.tts_provider)
                     values = {key: getattr(m, key) for key in (
                         'end_of_utterance_delay', 'transcription_delay', 'ttfb', 'duration',
                         'audio_duration', 'acquire_time', 'connection_reused', 'ttft',

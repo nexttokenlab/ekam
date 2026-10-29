@@ -170,3 +170,7 @@ The worker suppresses repeated committed message IDs within an epoch and identic
 
 ### Mayura voice translation
 Mayura (`mayura:v1`, modern-colloquial, spoken-form-in-native) is preferred for English ↔ supported Indian languages on utterances up to 1,000 characters. Pairs of two Indian languages (for example Hindi ↔ Kannada) use Sarvam-Translate (`sarvam-translate:v1`, formal mode, up to 2,000 characters). In live checks it answered Hindi ↔ Kannada in 1.2–1.4 s, versus 2.3–3.2 s for Mayura and 2.8–3.6 s for Gemini on the same pair. It goes through the same fallback race. `MAYURA_ENABLED=false` restores the prior translation path. Other language pairs, longer turns and Mayura failures use the existing configured LLM (Gemini on this deployment). Mayura has a five-second total deadline; the LLM client has six-second network timeouts and no automatic retries. STT/TTS are unchanged. Four synthetic live provider checks (English↔Hindi/Kannada) returned translations in 0.70–1.28 seconds locally; this is not a full voice latency benchmark.
+
+### Reproducible latency benchmarking
+
+See [docs/LATENCY_BENCHMARK.md](docs/LATENCY_BENCHMARK.md) for the offline harness, opt-in worker/browser instrumentation, metric definitions, and two-phone acceptance procedure. Mock traces are **simulated**, not provider measurements. No live speech-to-playback benchmark was performed as part of this change.

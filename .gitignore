@@ -19,3 +19,6 @@ PRIVATE_TEST_ACCESS.txt
 # Not app code: demo media/render output and design-tool settings stay local.
 demo-video/
 .impeccable/
+
+# Benchmark exports can include operational timing patterns; retain locally by default.
+benchmarks/results/
